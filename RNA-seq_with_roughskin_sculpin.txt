@@ -1,0 +1,1283 @@
+##index reference genome using STAR
+cat star_index.sh
+#!/bin/bash
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=100GB
+#SBATCH --job-name=star_index
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /arc/project/st-jeffrich-1/logs/star_align.out
+#SBATCH -e /arc/project/st-jeffrich-1/logs/star_alin.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/star_env
+
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+# Define paths
+GENOME_FASTA="/arc/project/st-jeffrich-1/reference/roughskin_sculpin2/SJL_p_chr.main.SM.fa"        # Path to genome FASTA file
+GTF_FILE="/arc/project/st-jeffrich-1/reference/roughskin_sculpin2/SJL_p_chr.gtf"      # Path to GTF annotations file
+INDEX_DIR="/arc/project/st-jeffrich-1/reference/roughskin_sculpin_genome_index"   # Path to output index directory
+
+# Create the output directory if it doesn't exist
+mkdir -p $INDEX_DIR
+
+# Run STAR genome indexing
+STAR \
+  --runThreadN $SLURM_CPUS_PER_TASK \         # Use the number of CPUs requested
+  --runMode genomeGenerate \                  # Run in genome generation mode
+  --genomeDir $INDEX_DIR \                    # Output directory for the index
+  --genomeFastaFiles $GENOME_FASTA \          # Input genome FASTA file
+  --sjdbGTFfile $GTF_FILE \                   # Input GTF annotations file
+  --sjdbOverhang 100 \                        # Read length - 1 (adjust based on your data)
+  --genomeSAindexNbases 13 \                  # Adjust based on genome size (see STAR manual)
+  
+
+# Check if the job completed successfully
+if [ $? -eq 0 ]; then
+  echo "STAR genome indexing completed successfully."
+else
+  echo "STAR genome indexing failed. Check the log file for details."
+  exit 1
+fi
+## align with reference genome using STAR
+cat star_align_rough.sh
+#!/bin/bash
+#SBATCH --time=01:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=star_align
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/star_align/alignment.out
+#SBATCH -e /scratch/st-jeffrich-1/star_align/alignment.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/star_env
+
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+#Determine if the read file includes the R1 character.
+#If it does, extract the sample name and R2 file path.
+if [[ "$R1" == *"R1"* ]]; then
+    sample=$(basename "$R1" "_R1_cut.fastq.gz")
+    R2="${R1/_R1/_R2}"
+else
+    echo "ERROR: File path does not appear to contain 'R1'" > /scratch/st-jeffrich-1/${initials}/logs/star_align/${sample}.log
+    exit 1
+fi
+
+#Running STAR
+STAR --runThreadN 12 \
+    --genomeDir //scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/roughskin_sculpin_genome_index \
+    --readFilesIn "${R1}" "${R2}" \
+    --readFilesCommand zcat \
+    --outFileNamePrefix /scratch/st-jeffrich-1/align_with_roughskin/star_align/${sample}_prefix_ \
+    --outSAMtype BAM SortedByCoordinate \
+    --outSAMunmapped Within \
+    --outSAMattributes NH HI NM MD \
+    --outSAMattrRGline ID:${sample}_RG1 SM:${sample} LB:${sample}_lib1 PL:illumina PU:${sample}unit1
+    
+#submitting the job:
+
+for R1 in /scratch/st-jeffrich-1/clean/*_R1_cut.fastq.gz; do 
+sbatch --export=R1=${R1},initials=${projectName} star_align.sh; 
+done
+
+###sort the alignment suing samtools
+cat samsort_align_rough.sh
+#!/bin/bash
+#SBATCH --time=12:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=sortsingle_rough
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/sort.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/sort.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/samtools_env
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+sample=$(basename "$R1" "_prefix_Aligned.sortedByCoord.out.bam")
+
+# Debugging: Check what $R1 contains
+    echo "Processing file: $R1"
+
+#Running samtools sort
+
+samtools sort -o /scratch/st-jeffrich-1/align_with_roughskin/samsort/${sample}_sorted.bam "$R1"
+
+#submitting the job
+for R1 in /scratch/st-jeffrich-1/align_with_roughskin/star_align/*_Aligned.sortedByCoord.out.bam; do 
+sbatch --export=R1=${R1},initials=${projectName} samsort_with_rough.sh; 
+done
+
+###index the alignment using samtools
+cat samindex_align_rough.sh
+#!/bin/bash
+#SBATCH --time=10:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=samindex_with_RS
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/samindex.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs//samindex.err
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/samtools_env
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+# Extract the sample name from the BAM file (e.g., file_name_sorted.bam)
+sample=$(basename "$BAM_FILE" "_sorted.bam")
+
+# Debugging: Check what $BAM_FILE contains
+echo "Processing file: $BAM_FILE"
+
+# Run samtools index to create an index for the BAM file
+samtools index "$BAM_FILE"
+
+# Confirm the creation of the index file
+echo "Index file created for $sample: ${BAM_FILE}.bai"
+
+#submitting the job
+
+for BAM_FILE in /scratch/st-jeffrich-1/align_with_roughskin/samsort/*_sorted.bam; do
+    sbatch --export=BAM_FILE="$BAM_FILE" samindex_with_rough.sh
+done
+### mark duplicate and not remove the duplicate
+## make a folder named mark_duplicate_no_remove
+mkdir -p mark_duplicate_no_remove
+cat mark_duplicate_no_remove_RS.sh
+#!/bin/bash
+#SBATCH --time=10:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=mark_duplicate_whithout_remove
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/align_mark_duplicate.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/align_mark_duplicate.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/picard_env
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+# Extract the sample name from the R1 file (e.g., file_name_R1_sorted.bam)
+sample=$(basename "$R1" "_sorted.bam")
+
+# Debugging: Check what $R1 contains
+    echo "Processing file: $R1"
+    
+#Running picard marking duplicate
+
+picard MarkDuplicates \
+   I="${R1}" \
+   O="/scratch/st-jeffrich-1/align_with_roughskin/mark_duplicate_no_remove/${sample}_marked.bam" \
+   M="/scratch/st-jeffrich-1/align_with_roughskin/mark_duplicate_no_remove/marked_dup_metrics_${sample}.txt" \
+   REMOVE_DUPLICATES=false
+   
+#submitting the job
+for R1 in /scratch/st-jeffrich-1/align_with_roughskin/samsort/*_sorted.bam; do 
+sbatch --export=R1=${R1} mark_duplicate_no_remove.sh; 
+done
+
+###check split using splitN 
+#make a new folder named splitN_with_RS
+cat splitN_with_RS.sh
+#!/bin/bash
+#SBATCH --time=10:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=splitN_check_with_RS
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/splitN_check.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/splitN_check.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/gatk_env
+
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+# Extract the sample name from the BAM file (e.g., file_name_sorted.bam)
+sample=$(basename "$BAM_FILE" "_marked.bam")
+
+# Ensure the output directory exists
+OUTPUT_DIR="/scratch/st-jeffrich-1/align_with_roughskin/splitN_with_RS"
+
+#Define output file name
+OUTPUT_BAM="${OUTPUT_DIR}/${sample}_split.bam"
+
+# Run GATK for spliteN
+gatk SplitNCigarReads \
+     -R /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/SJL_p_chr.main.SM.fa \
+     -I "BAM_FILE" \
+     -O "$OUTPUT_BAM"
+
+
+
+#submitting the job
+
+for BAM_FILE in /scratch/st-jeffrich-1/align_with_roughskin/mark_duplicate_no_remove/*_marked.bam; do
+    sbatch --export=BAM_FILE="$BAM_FILE" splitN_with_RS.sh
+done
+###call hyplotype for each sample using GATK HaplotypeCaller
+cat hap_call_with_RS.sh
+#!/bin/bash
+#SBATCH --time=10:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=haplotypecaller_with_RS
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/haplotypecaller_withRS.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/haplotypecaller_withRS.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/gatk_env
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+# Extract the sample name from the BAM file (e.g., CR1SW_split.bam -> CR1SW)
+sample=$(basename "$BAM_FILE" "_split.bam")
+
+# Debugging: Check what BAM_FILE contains
+echo "Processing file: $BAM_FILE"
+
+    
+#Running GATK haplotype caller
+
+gatk HaplotypeCaller \
+  -R /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/SJL_p_chr.main.SM.fa \
+  -I "$BAM_FILE" \
+  -O /scratch/st-jeffrich-1/align_with_roughskin/variant_call_with_RS/${sample}_raw_variants.g.vcf \
+  -ERC GVCF \
+  --sample-name "$sample" 
+
+### create a file with the name of all the genomic regions to include
+cat /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/SJL_p_chr.main.SM.fa.fai | cut -f1 > RS_contig_names.list
+
+
+### compress and index the individual sample
+#cat compress_gvf_RS_sh
+#!/bin/bash
+#SBATCH --time=3:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=index_gvcf
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/index_gvcf_RS.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/index_gvcf_RS.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/samtools_env
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+# Set your directory containing .g.vcf.gz files
+GVCF_DIR="/scratch/st-jeffrich-1/align_with_roughskin/variant_call_with_RS"  
+
+cd "$GVCF_DIR" || exit
+
+for file in *.g.vcf.gz; do
+  echo "Indexing $file"
+  tabix -p vcf "$file"
+done
+
+# index the compress file
+cat index_gvcf_RS.sh
+#!/bin/bash
+#SBATCH --time=3:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=index_gvcf
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/index_gvcf_RS.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/index_gvcf_RS.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/samtools_env
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+# Set your directory containing .g.vcf.gz files
+GVCF_DIR="/scratch/st-jeffrich-1/align_with_roughskin/variant_call_with_RS"  
+
+cd "$GVCF_DIR" || exit
+
+for file in *.g.vcf.gz; do
+  echo "Indexing $file"
+  tabix -p vcf "$file"
+done
+
+### generate a map file for Genomics DataBase import
+#!/bin/bash
+
+OUTPUT_FILE="gvcf_map.txt"
+> "$OUTPUT_FILE"  # Clear file if it exists
+
+for file in /scratch/st-jeffrich-1/align_with_roughskin/variant_call_with_RS/*.g.vcf.gz; do
+    if [[ -f "$file" ]]; then
+        # Extract the sample name from the VCF header
+        sample=$(zgrep -m1 "^#CHROM" "$file" | cut -f10)
+        echo -e "${sample}\t${file}" >> "$OUTPUT_FILE"
+    fi
+done
+
+
+### Import GVCFs into GenomicsDB
+cat genomicDBimport_with_RS
+#!/bin/bash
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=100GB
+#SBATCH --job-name=GenomicsDBimport_withRG
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/logs/GenomicsDBimport_withRG.out
+#SBATCH -e /scratch/st-jeffrich-1/logs/GenomicsDBimport_withRG.err
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/gatk_env
+
+# Run GATK GenomicsDBImport
+gatk GenomicsDBImport \
+    --genomicsdb-workspace-path /scratch/st-jeffrich-1/align_with_roughskin/sculpin_contigs_withRS_list_db \
+    --batch-size 50 \
+    --sample-name-map /scratch/st-jeffrich-1/align_with_roughskin/gvcf_withRS_map.txt \
+    --reader-threads 8 \
+    -L /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/RS_contig_names.list  # Adjust interval file path
+
+### joint genotyping  
+cat genotyping_with _RS.sh
+#!/bin/bash
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=128GB
+#SBATCH --job-name=genotype_with_RS
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/genotype_with_RS.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/genotype_with_RS.err
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/gatk_env
+
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+#Run GATK genotypeGVCF
+
+gatk GenotypeGVCFs \
+    -R /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/SJL_p_chr.main.SM.fa \
+    -V gendb:///scratch/st-jeffrich-1/align_with_roughskin/sculpin_contigs_withRS_list_db \
+    -L align_with_roughskin/roughskin_sculpin2/contig_names_RS.list \
+    --heterozygosity 0.001 \
+    --sample-ploidy 2 \
+    --only-output-calls-starting-in-intervals \
+    -O /scratch/st-jeffrich-1/align_with_roughskin/sculpin_rna_with_RS.vcf 2>&1 | tee /scratch/st-jeffrich-1/align_with_roughskin/sculpin_rna_withRS.vcf.log
+##bcftools view -v snps sculpin_rna_with_RS.vcf | grep -v "^#" | wc -l
+7,133,410 (variants)
+##bcftools view -H sculpin_rna_with_RS.vcf | cut -f7 | sort | uniq -c
+9037748 .
+
+
+###view how many variant sites
+gatk VariantsToTable -V output.vcf -F CHROM -F POS -F TYPE -O variants_table.txt
+
+###gatk VariantsToTable \
+   -V sculpin_rna_with_RS.vcf \
+   -F CHROM -F POS -F ID -F REF -F ALT -F QUAL -F FILTER \
+   -GF GT -GF DP -GF AD \
+   -O joint_calls_with_RS_table.tsv
+   
+#to view depth for each individual
+vcftools --vcf sculpin_rna_withRG.vcf \
+--depth \
+--out sculpin_withRG_depth
+## keep 80 out of 80 individuals
+#kept 9037748 out of a possible 9037748 Sites
+
+#to get the missingness per sample
+vcftools --vcf sculpin_rna_withRG.vcf \
+--missing-indv \
+--out sculpin_rna_withRG_miss_ind
+##results: After filtering, kept 9037748 out of a possible 9037748 Sites
+80 out of 80 individuals
+
+#select only SNPs
+gatk SelectVariants \
+   -R /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/SJL_p_chr.main.SM.fa \
+   -V /scratch/st-jeffrich-1/align_with_roughskin/sculpin_rna_with_RS.vcf \
+   --select-type-to-include SNP \
+   -O sculpin_rna_with_RS_snps.vcf
+
+# Run GATK VariantFiltration
+cat SNP_with_RS_filteration.sh
+
+#!/bin/bash
+#SBATCH --time=10:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=variant_filtering_with_RS
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/variant_filtering_with_RS.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/variant_filtering_with_RS.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/gatk_env
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+INPUT_VCF="/scratch/st-jeffrich-1/align_with_roughskin/sculpin_rna_with_RS_snps.vcf"
+OUTPUT_VCF="/scratch/st-jeffrich-1/align_with_roughskin/sculpin_rna_withRS_snps_only_filtered_1.vcf"
+
+# Run GATK VariantFiltration
+gatk VariantFiltration \
+    -V ${INPUT_VCF} \
+    -O ${OUTPUT_VCF} \
+    --filter-expression "QD < 2.0" \
+    --filter-name "LowQD" \
+    --filter-expression "FS > 30.0" \
+    --filter-name "HighFS" \
+    --filter-expression "MQ < 40.0" \
+    --filter-name "LowMQ" \
+    --filter-expression "SOR > 3.0" \
+    --filter-name "HighSOR" \
+    --filter-expression "DP < 10" \
+    --filter-name "BadDP" \
+    --filter-expression "QUAL < 30.0" \
+    --filter-name "LowQUAL" \
+    --filter-expression "ReadPosRankSum < -8.0" \
+    --filter-name "LowReadPosRankSum" \
+    --filter-expression "MQRankSum < -12.5" \
+    --filter-name "LowMQRankSum"
+    
+## results: 7,033,271
+
+#select bi-allelic SNPs
+bcftools view -m2 -M2 -v snps sculpin_snps_only_filtered_1.vcf -Oz -o bi_allelic_snp.vcf.gz
+
+#to check if it's successfully generate only SNPs file
+bcftools stats snps_only.vcf | grep "number of SNPs"
+##to write a snp.vcf file into a readable table or use GATK variantsToTable
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT[\t%GT]\n' snp.vcf > snp_table.tsv
+#to see how many SNPs
+bcftools view -H snps_only.vcf | wc -l
+##results: 7,033,271
+#to view the sample names in a .vcf.gz file
+bcftools query -l your_file.vcf.gz
+##filter data preparing for pop gen analysis
+# to filter out the SNPs with heterozygosity > 0.6
+cat /scratch/st-jeffrich-1/align_with_roughskin/bi_allelic_snp.vcf | perl vcf2maxhet_filter.pl 0.6 > /scratch/st-jeffrich-1/bi_allelic_snp_het0.6.vcf
+##results: 2471589 SNPs
+2471589 printed sites
+3998935 cut due to deterozygosity
+0 cut due to no data
+#generate a file containing heterozygosity (.het file)
+vcftools --vcf input.vcf --het --out heterozygosity
+
+#extracts the chromosome and position of SNPs with heterozygosity above 0.6 and saves them in high_het_sites.txt.
+awk '$6 > 0.6 { print $1, $2 }' heterozygosity.het > high_het_sites.txt
+
+#removed the high heterozygosity SNPs
+vcftools --vcf input.vcf --exclude-positions high_het_sites.txt --recode --out filtered_output
+
+#filter out the missing data and minor allel frequency
+bcftools filter -i 'FMT/GQ>=10' bi_allelic_with_RS_snp_het0.6.vcf | \
+vcftools --vcf - --max-missing 0.7 --maf 0.05 --recode --out bi_allelic_snp_with_RS_het0.6_gq10_maf0.05
+##resutls: After filtering, kept 128,574 out of a possible 1431232 Sites
+Run Time = 101.00 seconds
+##List SNPs positions from 8- samples
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' bi_allelic_snp_with_RS_het0.6_gq10_maf0.05.recode.vcf > sample_SNP_positions.txt
+##Generate Reference Genome sequences at SNP Sites
+# Convert SNP positions to BED format (0-based)
+awk '{print $1"\t"$2-1"\t"$2}' sample_SNP_positions.txt > sample_SNP_positions.bed
+
+# Extract reference alleles
+bedtools getfasta -fi /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/SJL_p_chr.main.SM.fa -bed sample_SNP_positions.bed -fo ref_snps.fasta -tab
+
+
+# Convert to FASTA format
+echo ">REFERENCE" > ref_phylogeny.fasta
+awk '{printf $2}' ref_snps.fasta >> ref_phylogeny.fasta
+## convert 80 samples into fasta format
+vcf2fasta -f ref_genome.fa -p samples_phylogeny samples.vcf.gz
+##or using vcf2phylpi.py, this only print.fasta sn .nex file as output
+python vcf2phylip.py -i bi_allelic_snp_with_RS_het0.6_gq10_maf0.05.recode.vcf --fasta --nexus --phylip
+##using vcf2phy.sh to convertt he alignment into .phylip file
+cat vcf2phy.sh
+#!/bin/bash
+#SBATCH --time=06:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=vcf2phy
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/logs/vcf2phy.out
+#SBATCH -e /scratch/st-jeffrich-1/logs/vcf2phy.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/vcf2phy
+
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+# Run vcf2phylip directly
+vcf2phylip.py -i /scratch/st-jeffrich-1/align_with_roughskin/bi_allelic_snp_with_RS_het0.6_gq10_maf0.05.recode.vcf \
+              -o /scratch/st-jeffrich-1/align_with_roughskin/bi_allelic_snp_with_RS_het0.6_gq10_maf0.05.phy 
+# Check if .phy file was generated
+if [ ! -f /scratch/st-jeffrich-1/align_with_roughskin/bi_allelic_snp_with_RS_het0.6_gq10_maf0.05.phy ]; then
+    echo "Error: .phy file not generated!" >&2
+    exit 1
+fi
+##merge 80 sample sequences and the reference .fasta files together
+cat samples_phylogeny.fasta ref_phylogeny.fasta > combined.fasta
+
+## to prune snp data for PCA and Admixture analysis
+#convert to plink format (.bed, .bim, .fam)
+plink --vcf bi_allelic_snp_with_RS_het0.6_gq10_miss07_maf0.05.vcf --makebed --out ./POP_GEN_WITH_RS/bi_allelic_snp_with_RS_het0.6_gq10_miss07_maf0.05_plink
+#when head bi_allelic_snp_with_RS_het0.6_gq10_miss07_maf0.05_plink.bim
+1	.	0	24559	A	C
+1	.	0	24567	T	C
+1	.	0	26303	T	G
+1	.	0	31549	C	A
+1	.	0	31579	G	A
+1	.	0	33459	G	A
+1	.	0	34194	T	C
+1	.	0	34195	T	C
+1	.	0	36654	T	C
+1	.	0	37855	A	G
+#this is not an appropriate format, to fix it
+awk 'BEGIN{OFS="\t"} {$2=$1":"$4; print}' \
+   bi_allelic_snp_with_RS_het0.6_gq10_miss07_maf0.05_plink.bim > fixed.bim ##Note, the file changed the name, so other file also need to change thir name
+cp bi_allelic_snp_with_RS_het0.6_gq10_miss07_maf0.05_plink.bed fixed.bed
+cp bi_allelic_snp_with_RS_het0.6_gq10_miss07_maf0.05_plink.fam fixed.fam
+#prune the dataset
+plink --bfile fixed \
+      --indep-pairwise 50 5 0.2 \
+      --out valid_prune
+##out put: Pruning complete.  84676 of 128574 variants removed. Files are valid_prune.prune.in, valid_prune.prune.out, valid_prune.nosex, valid_prune.log        
+head valid_prune.prune.in
+1:24567
+1:26303
+1:31549
+1:33459
+1:34194
+1:36654
+1:40167
+1:45985
+1:50391
+1:54765
+##This is the desired format!
+###Creat the the pruned dataset
+plink --bfile fixed \
+      --extract valid_prune.prune.in \
+      --make-bed \
+      --out analysis_ready
+##43898 variants and 80 people pass filters and QC.
+##to verify the dat
+wc -l analysis_ready.bim
+#output: 43898 analysis_ready.bim
+head analysis_ready.bim 
+#output: 1	1:24567	0	24567	T	C
+1	1:26303	0	26303	T	G
+1	1:31549	0	31549	C	A
+1	1:33459	0	33459	G	A
+1	1:34194	0	34194	T	C
+1	1:36654	0	36654	T	C
+1	1:40167	0	40167	G	A
+1	1:45985	0	45985	A	C
+1	1:50391	0	50391	T	C
+1	1:54765	0	54765	G	A
+##file integrity check:
+md5sum valid_prune.prune.in
+#output: ccf7e2b4e54c3c26535dcbf1a5a4cbc5  valid_prune.prune.in
+##Run PCA analysis
+plink --bfile analysis_ready \
+      --pca 20 \
+      --out pca_results
+#output: pca_results.eigenval and pca_results.eigenvec
+##use R to view the PCA reslts:
+# Load necessary libraries
+library(plotly)
+library(RColorBrewer)
+library(ggplot2)
+library(cowplot)
+library(crosstalk)
+library(rmarkdown)
+# Load the PCA results
+pca_data <- read.table("/Users/Sherry/Desktop/pca_results.eigenvec", header = FALSE)
+str(pca_data)
+# Load the population information
+pop_data <- read.table("/Users/Sherry/Desktop/RNA_seq _equence_analysis/population_ID.txt", header = TRUE)
+
+# Load the eigenvalues
+eigenvalues <- read.table("/Users/Sherry/Desktop/pca_results.eigenval", header = FALSE)
+
+# Calculate the proportion of variance explained
+variance_explained <- eigenvalues$V1 / sum(eigenvalues$V1) * 100
+
+# Merge PCA results with population information
+colnames(pca_data)[1:5] <- c("FID", "IID", "PC1", "PC2", "PC3")  # Assign column names
+merged_data <- merge(pca_data, pop_data, by.x = "IID", by.y = "IID")
+
+# Assign colors using RColorBrewer
+num_pops <- length(unique(merged_data$Population))  # Get number of unique populations
+pop_colors <- brewer.pal(min(num_pops, 9), "Set3")  # Choose colors for up to 9 groups
+names(pop_colors) <- unique(merged_data$Population)
+
+# Convert Population to a factor for consistent coloring
+merged_data$Population <- as.factor(merged_data$Population)
+
+# Create 3D PCA Plot with plotly
+pca_3D_plot <- plot_ly(
+  merged_data, 
+  x = ~PC1, y = ~PC2, z = ~PC3, 
+  color = ~Population, 
+  colors = pop_colors
+) %>%
+  add_markers() %>%
+  layout(scene = list(
+    xaxis = list(title = paste0("PC1 (", round(variance_explained[1], 2), "%)")),
+    yaxis = list(title = paste0("PC2 (", round(variance_explained[2], 2), "%)")),
+    zaxis = list(title = paste0("PC3 (", round(variance_explained[3], 2), "%)"))
+  ))
+
+# Display the 3D plot
+pca_3D_plot
+
+htmlwidgets::saveWidget(pca_3D_plot, "/Users/Sherry/Desktop/snp_pruned_pca_plot3D.html")  # Save as HTML
+# Create 2D PCA plot using ggplot2
+pca_2D_plot <- ggplot(merged_data, aes(x = PC1, y = PC2, color = Population)) +
+  geom_point(size = 2) +
+  scale_color_manual(values = pop_colors) +
+  labs(
+    x = paste0("PC1 (", round(variance_explained[1], 2), "%)"),
+    y = paste0("PC2 (", round(variance_explained[2], 2), "%)"),
+    title = "PCA Plot with Population Colors"
+  ) +
+  theme_cowplot() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+# Save the 2D PCA plot
+ggsave("/Users/Sherry/Desktop/pca_with_RSplot.png", pca_2D_plot, 
+       width = 8, height = 6, dpi = 300)
+
+# Display the 2D PCA plot
+print(pca_2D_plot)
+## admixture analysis using analysis_ready
+cat admixture_with_RS.sh
+#!/bin/bash
+
+#SBATCH --time=72:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=admixture_with_RS
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/admixture_with_RS.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/admixture_with_RS.err
+#SBATCH --array=1-10
+
+
+# Add admixture to PATH
+export PATH=$PATH:/scratch/st-jeffrich-1/align_with_roughskin/POP_GEN_WITH_RS/dist/admixture_linux-1.3.0/
+
+# Move to your working directory (if needed)
+cd /scratch/st-jeffrich-1/align_with_roughskin/POP_GEN_WITH_RS/analysis_ready/
+
+# K value from SLURM array task ID
+K=${SLURM_ARRAY_TASK_ID}
+
+# Run admixture with cross-validation, using 4 threads
+admixture --cv=10 -j4 valid_pruned.bed $K
+#output: .Q and P files, the CVs are from the admixture_with_RS.out, P files were used to view the results. CV values from .log file were used to calculate best K.
+####admixture bar plot######
+library(ggplot2)
+library(cowplot)
+# Load the ancestry proportions
+admix <- read.table("/Users/Sherry/Desktop/analysis_ready.4.Q")
+
+# Load population information
+pop_info <- read.table("/Users/Sherry/Desktop/RNA_seq _equence_analysis/population_INFO.txt", header = TRUE)
+
+# Ensure the order of individuals matches between ADMIXTURE and population information
+if (nrow(admix) != nrow(pop_info)) {
+  stop("Number of individuals in ADMIXTURE output and population file do not match!")
+}
+
+# Add population information as row names
+rownames(admix) <- pop_info$Individual
+
+# Convert the data to a format suitable for ggplot2
+admix_long <- reshape2::melt(as.matrix(admix))
+colnames(admix_long) <- c("Individual", "Ancestry", "Proportion")
+
+# Merge with population information
+admix_long$Population <- pop_info$Population[match(admix_long$Individual, pop_info$Individual)]
+
+# Create the barplot using ggplot2
+p <- ggplot(admix_long, aes(x = Individual, y = Proportion, fill = Ancestry)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = rainbow(9)) +
+  labs(x = "Individuals", y = "Ancestry Proportion", title = "ADMIXTURE (K=3)") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),
+    legend.position = "none",  # Remove the legend from the main plot
+    panel.background = element_rect(fill = "white"),  # White background
+    plot.background = element_rect(fill = "white"),   # White background for the entire plot
+    panel.grid.major = element_line(color = "gray90"),  # Light gray grid lines
+    panel.grid.minor = element_blank()  # Remove minor grid lines
+  )
+
+# Extract the legend explicitly
+legend <- get_legend(
+  p + theme(legend.position = "right")  # Create a standalone legend
+)
+
+# Combine the plot and legend using cowplot
+combined_plot <- plot_grid(p, legend, ncol = 2, rel_widths = c(4, 1))
+
+# Save the combined plot with high resolution
+ggsave("/Users/Sherry/Desktop/admixture_with_RS_plot_4.png", combined_plot, width = 12, height = 6, dpi = 300)
+####to view best K#####
+# Load required library
+library(ggplot2)
+
+# Create a data frame with K and CV errors
+cv_data <- data.frame(
+  K = 1:10,
+  CV_error = c(0.68717, 0.67227, 0.67913, 0.71239, 0.75720, 0.81041, 0.88541, 0.98649, 1.01922, 1.09652)
+)
+
+# Plot the CV errors
+ggplot(cv_data, aes(x = K, y = CV_error)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = 1:10, labels = 1:10) +  # Set x-axis ticks and labels
+  labs(x = "Number of ancestral populations (K)", y = "Cross-validation error", title = "ADMIXTURE Cross-Validation Error") +
+  theme_minimal()
+#Use combined.fasta to build phylogeny tree, using REFERENCE as outgroup
+cat iqtree_with_RS.sh
+#!/bin/bash
+#SBATCH --time=72:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=iqtree_with_RS
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/iqtree_with_RS.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/iqtree_with_RS.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/bioenv
+
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+# Run IQ-TREE with your phylogenetic data file
+iqtree2 -s /scratch/st-jeffrich-1/align_with_roughskin/cleaned.fasta -m GTR+F+R3 -bb 1000 -alrt 1000 -nt 12 -st DNA --prefix snp_analysis --seqtype DNA
+
+#######SELECTION###############
+##prepare the snp.vcf file for each salinity
+##prepare sample list for each salinity, looks like:
+CR2AW
+CR4AW
+CR5AW
+CR7AW
+CR8AW
+FL1AW
+FL2AW
+.
+.
+.
+#so as SW
+##select the snp.vcf file each salinity:
+bcftools view -S FW_samples.txt bi_allelic_snp_with_RS_het0.6_gq10_miss07_maf0.05.vcf -o FW_filtered_no_prune.vcf
+bcftools view -S SW_samples.txt bi_allelic_snp_with_RS_het0.6_gq10_miss07_maf0.05.vcf -o SW_filtered_no_prune.vcf
+###check the name of newly gnerated snp.vcf file
+bcftools query -l SW_filtered_no_prune.vcf
+bcftools query -l FW_filtered_no_prune.vcf
+##use vcftools to calculate Fst for each snp site.
+cat FW_Fst_no_prune.sh
+#!/bin/bash
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=100GB
+#SBATCH --job-name=FW_Fst_filtered_no_prune
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/FW_Fst_filtered_no_prune.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/FW_Fst_filtered_no_prune.err
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/bioenv
+
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+# Freshwater pairwise Fst
+vcftools --vcf FW_filtered_no_prune.vcf --weir-fst-pop FW_CL_samples.txt --weir-fst-pop FW_CR_samples.txt --out FW_CL_vs_CR_filtered_no_prune
+vcftools --vcf FW_filtered_no_prune.vcf --weir-fst-pop FW_CL_samples.txt --weir-fst-pop FW_IL_samples.txt --out FW_CL_vs_IL_filtered_no_prune
+vcftools --vcf FW_filtered_no_prune.vcf --weir-fst-pop FW_CR_samples.txt --weir-fst-pop FW_IL_samples.txt --out FW_CR_vs_IL_filtered_no_prune
+
+## the same script applied to the SW acclimated samples. Will get .weir.fst results
+##using thos results to find Fst outliers and visualize them in r
+##download those data into my own laptop
+scp lius8208@sockeye.arc.ubc.ca:/scratch/st-jeffrich-1/align_with_roughskin/SELECTION/*_withzero.weir.fst /Users/Sherry/Desktop/
+##use R ro calculate and view
+## for SNPs Fst, view the results in manhattan plots and identify the outlier (1%)###
+# Load libraries
+library(data.table)
+library(ggplot2)
+library(dplyr)
+
+# Set input and output directories
+input_dir <- "/Users/Sherry/Desktop/RNA_seq_sequence_analysis/selection_with_RS"       # <-- change this to your actual folder path
+output_dir <- "/Users/Sherry/Desktop/RNA_seq_sequence_analysis/selection_with_RS"    # <-- change this too
+
+# Create output directory if it doesn't exist
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# List all Fst result files in your input directory
+fst_files <- list.files(path = input_dir, pattern = "*.weir.fst", full.names = TRUE)
+
+# Loop through each file
+for (file in fst_files) {
+  
+  # Create output prefix from file name (without path and extension)
+  out_prefix <- gsub(".weir.fst", "", basename(file))
+  
+  # Read the Fst data
+  fst_data <- fread(file, header=TRUE)
+  
+  # Remove missing or NA Fst values
+  fst_data <- fst_data[!is.na(WEIR_AND_COCKERHAM_FST)]
+  
+  # Show summary stats in console
+  cat("\nSummary for", out_prefix, ":\n")
+  print(summary(fst_data$WEIR_AND_COCKERHAM_FST))
+  
+  # Calculate 99th percentile threshold (top 1%)
+  threshold_1pct <- quantile(fst_data$WEIR_AND_COCKERHAM_FST, 0.99)
+  cat("99th percentile Fst threshold:", threshold_1pct, "\n")
+  
+  # Identify outlier SNPs (>= top 1% Fst)
+  outliers <- fst_data[fst_data$WEIR_AND_COCKERHAM_FST >= threshold_1pct]
+  
+  # Save outlier SNPs to a text file
+  fwrite(outliers, file.path(output_dir, paste0(out_prefix, "_Fst_outliers_1pct.txt")), sep="\t")
+  
+  # Manhattan plot
+  manhattan_plot <- ggplot(fst_data, aes(x=POS, y=WEIR_AND_COCKERHAM_FST)) +
+    geom_point(size=0.5, alpha=0.6) +
+    facet_wrap(~CHROM, scales="free_x") +
+    geom_hline(yintercept=threshold_1pct, color="red", linetype="dashed") +
+    theme_minimal() +
+    labs(title=paste0("Manhattan Plot: ", out_prefix),
+         x="Position", y="Fst")
+  
+  ggsave(file.path(output_dir, paste0(out_prefix, "_Manhattan.png")), 
+         manhattan_plot, width=10, height=5, dpi=300)
+  
+  # Fst distribution histogram
+  hist_plot <- ggplot(fst_data, aes(x=WEIR_AND_COCKERHAM_FST)) +
+    geom_histogram(binwidth=0.02, fill="skyblue", color="black") +
+    geom_vline(xintercept=threshold_1pct, color="red", linetype="dashed") +
+    theme_minimal() +
+    labs(title=paste0("Fst Distribution: ", out_prefix),
+         x="Fst", y="Number of SNPs")
+  
+  ggsave(file.path(output_dir, paste0(out_prefix, "_Fst_distribution.png")),
+         hist_plot, width=7, height=5, dpi=300)
+
+##Annotation using snpEff
+#As roughskin sculpin (Trachidermus fasciatus) is not a model species, not in snpeff data set, we need to construct the genome data base
+#in /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/snpeff_env/share/snpeff-5.2-1/, there are data and snpEff.config files.
+#In snpEff.config file, in Databases & Genomes section, add a line:  roughskin.genome : Roughskin sculpin
+#In the data file, link the .fa and .gtf file from original genome information
+ln -s /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/SJL_p_chr.main.SM.fa sequences.fa
+ln -s /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/SJL_p_chr.gtf genes.gtf
+# after building, he rare allel and protein are missing, build them using 
+gffread -g /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/SJL_p_chr.main.SM.fa \
+        -x /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/cds.fa \
+        -y /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/protein.fa \
+        /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/SJL_p_chr.gtf
+#add the .fa and .gtf information into the config file
+#nano snpEff.config
+roughskin.reference : /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/snpeff_env/sha...-1/miniconda3/envs/snpeff_env/share/snpeff-5.2-1/data/roughskin/genes.gtf
+#Now, can do snpEff annotation
+#cat snpeff_annotation_with_RS.sh
+#!/bin/bash
+#SBATCH --time=48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32GB
+#SBATCH --job-name=snpeff_annotation_with_RS
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/snpeff_annotation_with_RS.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/snpeff_annotation_with_RS.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/snpeff_env
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+snpEff roughskin /scratch/st-jeffrich-1/align_with_roughskin/sculpin_rna_with_RS_snps.vcf > /scratch/st-jeffrich-1/align_with_roughskin/annotated_sculpin_rna_with_RS_snps.vcf
+# Print a message when done
+echo "SnpEff annotation completed!"
+
+#For PHASER ASE analysis
+#select heterozygous_bi_allelic_snps first
+ bcftools view -i 'GT="0/1" || GT="1/0"' bi_allelic_snp.vcf > heterozygous_bi_allelic_snp_with_RS.vcf
+## send  heterozygous_bi_allelic_snp_with_RS.vcf for snpEff annotaion: snpeff_annotation_het_bi_snps_with_RS.sh
+##select high and moderate impact snps for PHASER ASE analysis:
+bcftools view -i 'INFO/ANN[*] ~ "HIGH"' annotated_sculpin_snps_only.vcf > high_impact_snps.vcf
+bcftools view -i 'INFO/ANN[*] ~ "MODERATE"' annotated_sculpin_snps_only.vcf > moderate_impact_snps.vcf
+##Separate habitats, do each habitat itsef:
+#The BAM files that will be used in the PHASER ASE analysis need to be indexed:samtools_env) [lius8208@login02 star_align]$ for bam in *_Aligned.sortedByCoord.out.bam; do 
+> samtools index "$bam"
+> done
+
+
+## Search GO term and KEGG terms for the genes in annotation file using emapper.py
+conda create -n eggnog -c bioconda eggnog-mapper  ## download using conda
+##download the diamond database
+in /scratch/st-jeffrich-1/align_with_roughskin/
+mkdir -p eggnog_db
+#activate conda environment
+conda activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/eggnog
+##download the database
+python /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/eggnog/bin/download_eggnog_data.py --data_dir /scratch/st-jeffrich-1/align_with_roughskin/eggnog_db
+ ## run the slurm script for finding the functions, cat eggnog_with_RS.sh
+!/bin/bash
+#SBATCH --time=72:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=64GB
+#SBATCH --job-name=eggnog_with_RS
+#SBATCH --account=st-jeffrich-1
+#SBATCH -o /scratch/st-jeffrich-1/align_with_roughskin/logs/eggnog_with_RS.out
+#SBATCH -e /scratch/st-jeffrich-1/align_with_roughskin/logs/eggnog_with_RS.err
+
+# Load the conda environment
+module load miniconda3
+source activate /arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/eggnog
+
+
+# Change to working directory
+cd $SLURM_SUBMIT_DIR
+
+# Run EggNOG-mapper with HMMER for speed
+emapper.py \
+  -i /scratch/st-jeffrich-1/align_with_roughskin/roughskin_sculpin2/protein.fa \
+  -o /scratch/st-jeffrich-1/align_with_roughskin/roughskin_eggnog \
+  --cpu 12 \
+  --usemem \
+  -m diamond \
+  --data_dir /scratch/st-jeffrich-1/align_with_roughskin/eggnog_db
+  
+##For phaser analysis, to run the slurm job:
+for BAM in /scratch/st-jeffrich-1/align_with_roughskin/star_align/*_prefix_Aligned.sortedByCoord.out.bam; do
+    sbatch phaser_ase_low_impact.sh "$BAM"
+done  
+##generate readable column txt file from snp annotation.vcf file with the headers
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t%QUAL\t%FILTER\t%ANN\n' \
+    annotated_sculpin_rna_with_RS_snps.vcf | \
+    awk 'BEGIN {print "CHROM\tPOS\tREF\tALT\tQUAL\tFILTER\tANN"} {print}' \
+    > variant_annotations_with_RS_fixed.tsv
+    
+##For each snp (CHROM POS, there are multiple genes, to separate the genes into different lines)
+bcftools reheader -h new_header.txt \
+  annotated_sculpin_rna_with_RS_het_bi_snps.vcf > rehead_ann.vcf
+  bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t%INFO/ANN\n' rehead_ann.vcf | \
+  awk -F'\t' 'BEGIN {
+    print "CHROM\tPOS\tREF\tALT\tGene_Name\tAnnotation\tImpact\tHGVS.c\tHGVS.p"
+  } {
+    split($5, ann, "|");
+    print $1,$2,$3,$4,ann[4],ann[2],ann[3],ann[10],ann[11]
+  }' > annotation_per_line_het_bi_snps.tsv
+##find overlapped snps in the Fst file and annotation file
+##multiple genes each line
+import pandas as pd
+
+# Read FST and annotation files
+fst_df = pd.read_csv("common_positions_all_files_5pct.txt", sep="\t")
+annot_df = pd.read_csv("variant_annotations_with_RS_fixed.tsv", sep="\t")
+
+# Merge to find overlaps (inner join on CHROM+POS)
+overlap_df = pd.merge(
+    fst_df[["CHROM", "POS", "WEIR_AND_COCKERHAM_FST"]],
+    annot_df[["CHROM", "POS", "GENE", "EFFECT", "IMPACT"]],
+    on=["CHROM", "POS"],
+    how="inner"
+)
+
+# Save overlaps
+overlap_df.to_csv("anno_overlapping_Fst_snps.tsv", sep="\t", index=False)
+##one gene per line
+
+###eQTL analysis (in r)
+#To prepare the gene expression file, treatment and region need to be dummied
+ normcounts <- read.table("new2024/normcounts.txt", header=TRUE, row.names=NULL)
+
+# Move the "Sequence" column to row names
+rownames(normcounts) <- normcounts$Sequence
+normcounts <- normcounts[, -ncol(normcounts)]  # Remove the "Sequence" column
+colnames(normcounts)
+# Transpose the data (samples as rows, genes as columns)
+gene_expression <- t(normcounts)
+
+# Save the reformatted data to a new file
+write.table(gene_expression, file="new2024/gene_expression.txt", sep="\t", quote=FALSE, col.names=NA)
+##perform PCA analysis
+# Load the gene expression data
+gene_expression <- read.table("new2024/gene_expression.txt", header=TRUE, row.names=1)
+
+##To prepare the co-variate file
+# Perform PCA
+pca_results <- prcomp(gene_expression, scale=TRUE)
+
+# Extract the PC scores (first 10 PCs)
+pc_scores <- pca_results$x[, 1:10]
+
+# Add sample IDs as a column
+pc_scores <- data.frame(SampleID=rownames(pc_scores), pc_scores)
+
+# Save the PC scores to a file
+write.table(pc_scores, file="new2024/pc_scores.txt", sep="\t", quote=FALSE, row.names=FALSE)
+
+# Load the metadata and PC scores
+metadata <- read.table("PS_gill_RNA_metafile_eQTL.txt", header=TRUE, sep="\t")
+pc_scores <- read.table("new2024/pc_scores.txt", header=TRUE, sep="\t")
+
+# Merge the two tables by SampleID
+# Use by.x="Sample" (column in metadata) and by.y="SampleID" (column in pc_scores)
+covariates <- merge(metadata, pc_scores, by.x="Sample", by.y="SampleID")
+
+# Save the combined covariates table
+write.table(covariates, file="new2024/covariates.txt", sep="\t", quote=FALSE, row.names=FALSE)
+ library(fastDummies)
+covatiates2 <- read.table("new2024/covariates.txt", header = TRUE, sep = "\t", check.names = FALSE)
+head(covatiates2)
+covatiates2 <- as.data.frame(covatiates2)
+str(covatiates2)
+# Create dummy variables for "Region" and "Treatment"
+covariates_encoded <- dummy_cols(
+  covatiates2,
+  select_columns = c("Region", "Treatment"),
+  remove_selected_columns = TRUE,  # Remove the original categorical columns
+  remove_first_dummy = TRUE  # Ensures only k-1 dummy variables are created
+)
+
+# Verify the updated covariates matrix
+head(covariates_encoded)
+
+write.table(covariates_encoded,
+            file="new2024/covariates_encoded.txt",
+            sep = "\t",                      # Use tab as the delimiter
+            quote = FALSE,                   # Do not surround values with quotes
+            row.names = TRUE,               # Do not include row names
+            col.names = TRUE )
+##To prepare the snp data
+library(data.table)
+# Read the .bim file
+bim_data <- fread("DE_Results_limma_voom_2025/new_arrange/snp_data_matched.bim")
+colnames(bim_data) <- c("chr", "snp_id", "cm", "pos", "a1", "a2")
+
+# Format chromosome with leading zeros (chr01, chr02, etc.)
+bim_data$chromosome <- paste0("chr", sprintf("%02d", bim_data$chr))
+
+# Keep position as numeric
+bim_data$position <- bim_data$pos
+
+# Create a unique SNP identifier that combines both
+bim_data$snp_id_combined <- paste0(bim_data$chromosome, "_", bim_data$position)
+
+cat("Created", nrow(bim_data), "SNP entries with separate chr/pos headers\n")
+cat("Example chromosomes:", head(unique(bim_data$chromosome)), "\n")
+cat("Example positions:", head(bim_data$position), "\n")
+cat("Example combined IDs:", head(bim_data$snp_id_combined), "\n")
+
+# Read the raw file
+snp_data <- fread("DE_Results_limma_voom_2025/new_arrange/snp_data_for_matrixeqtl.raw", na.strings = "NA")
+
+# Extract sample names
+sample_names <- snp_data$IID
+
+# Remove metadata columns and clean SNP names
+snp_data_clean <- snp_data[, -c(1:6)]
+colnames(snp_data_clean) <- gsub("^._", "", colnames(snp_data_clean))
+
+# Convert to matrix and set sample names as row names
+snp_matrix <- as.matrix(snp_data_clean)
+rownames(snp_matrix) <- sample_names  # This is the critical step!
+
+# Transpose for MatrixEQTL (SNPs as rows, samples as columns)
+snp_matrix_t <- t(snp_matrix)
+
+# Convert to data.table first
+snp_dt <- as.data.table(snp_matrix_t, keep.rownames = "original_index")
+
+# Add chromosome and position information
+# Assuming the order matches between .bim and .raw files
+snp_dt$chromosome <- bim_data$chromosome
+snp_dt$position <- bim_data$position
+snp_dt$snp_id <- bim_data$snp_id_combined
+
+# Remove the original index column
+snp_dt[, original_index := NULL]
+
+# Reorder columns: chromosome, position, snp_id, then samples
+setcolorder(snp_dt, c("chromosome", "position", "snp_id", sample_names))
+
+cat("Step 4: Handling missing values...\n")
+
+# Calculate missing percentage for each SNP (skip the first 3 metadata columns)
+missing_percent <- rowSums(is.na(snp_dt[, -c(1:3)])) / (ncol(snp_dt) - 3)
+keep_snps <- missing_percent < 0.1
+snp_dt_clean <- snp_dt[keep_snps, ]
+
+cat("Removed", sum(!keep_snps), "SNPs with ≥10% missing data\n")
+cat("Retained", sum(keep_snps), "SNPs for analysis\n")
+
+cat("Step 5: Saving cleaned SNP file...\n")
+fwrite(snp_dt_clean, "DE_Results_limma_voom_2025/new_arrange/SNP_Data_MatrixEQTL_With_Headers.txt", sep = "\t", na = "NA")
+
+cat("Step 6: Verification...\n")
+cat("Final file dimensions:", nrow(snp_dt_clean), "SNPs ×", ncol(snp_dt_clean)-3, "samples\n")
+cat("Column headers:", colnames(snp_dt_clean), "\n")
+cat("First few entries:\n")
+print(head(snp_dt_clean[, 1:6]))  # Show first few columns
+
+cat("SNP file with separate chromosome/position headers is ready!\n")
+cat("Saved as: SNP_Data_MatrixEQTL_With_Headers.txt\n")
+
+###Merge the eQTL file and the significant differentially expressed genes with annotation####
+
+
+
+
+## In r on HPC, when install a library, better to activate R conda environment and use conda install. If cannot find, in r, print(.libPaths())
+##it will show the path, e.g., "/arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/R4_env/lib/R/library"
+##then conda_lib_path <- "/arc/project/st-jeffrich-1/arc/project/st-jeffrich-1/miniconda3/envs/R4_env/lib/R/library"
+.libPaths(c(conda_lib_path, .libPaths()))
+##To load the library: Attempting to load updated packages...
+> success_go <- tryCatch({
+    library(GO.db)
+    TRUE
+}, error = function(e) {
+    cat("Error loading GO.db:", e$message, "\n")
+    FALSE
+})
+success_annot <- tryCatch({
+    library(AnnotationDbi)
+    TRUE
+}, error = function(e) {
+    cat("Error loading AnnotationDbi:", e$message, "\n")
+    FALSE
+})
+#To get the GO term annotation:
+>library(GO.db)
+> library(AnnotationDbi)
+> library(tidyverse)
+> library(httr)
+> library(jsonlite)
+get_go_info <- function(go_ids) {
+  unique_go <- unique(na.omit(go_ids))
+  
+  go_info <- data.frame(
+    GO_Term = unique_go,
+    Ontology = sapply(unique_go, function(x) {
+      # Try multiple ways to get ontology
+      term <- tryCatch(GOTERM[[x]], error = function(e) NULL)
+      if (!is.null(term)) {
+        # Try different methods to extract ontology
+        ont <- tryCatch(ONTOLOGY(term), error = function(e) NA)
+        if (is.na(ont)) {
+          ont <- tryCatch(term@Ontology, error = function(e) NA)
+        }
+        return(ont)
+      } else {
+        return(NA)
+      }
+    }),
+    Term = sapply(unique_go, function(x) {
+      tryCatch(Term(GOTERM[[x]]), error = function(e) NA)
+    }),
+    Definition = sapply(unique_go, function(x) {
+      tryCatch(Definition(GOTERM[[x]]), error = function(e) NA)
+} return(go_info)ors = FALSE
+> test_terms <- c("GO:0005737", "GO:0005856", "GO:0007155")
+> test_info <- get_go_info(test_terms)
+print(test_info)
+all_go_terms <- unique(na.omit(eqtl_annotated_file$GO_Terms))
+> get_go_info <- function(go_ids) {
+  library(jsonlite)s))
+  
+> go_info <- get_go_info(all_go_terms)
+> head(go_info)
+> eqtl_annotated_file <- read.delim("eQTL_round1_go_annotated.tsv", sep = "\t", stringsAsFactors = FALSE)> eqtl_fully_annotated <- eqtl_annotated_file %>%
+    left_join(go_info, by = c("GO_Terms" = "GO_Term"))
+> write.table(eqtl_fully_annotated, "eQTL_round1_fully_annotated.tsv", sep = "\t", row.names = FALSE, quote = FALSE)               
