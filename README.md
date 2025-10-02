@@ -7,5 +7,6 @@ I contains reference genome index using STAR
            pairwise Fst and outlier identification
            PCA analysis using called SNPs
            phylogenetic analysis using IQ-tree
+           Allele specific expression (ASE) using Phaser
            Gene ontology annotation
            eQTL using MatrixEQTL
